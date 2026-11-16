@@ -26,11 +26,16 @@ func NewNoopLogger() *Logger {
 	return New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// Scoped returns a child Logger whose every message is prefixed with "[name] ".
-// This provides component or subsystem context without relying on slog attribute
-// groups.
+// Scoped returns a child Logger whose every record has the ComponentKey
+// attribute set to name. Scoping a scoped Logger joins the names with dots, e.g.,
+// Scoped("db").Scoped("gorm") logs "component":"db.gorm", so log explorers can
+// filter a component and everything under it by prefix. The attribute stays at
+// the top level even when the parent Logger has groups.
 func (l *Logger) Scoped(name string) *Logger {
-	return New(newPrefixHandler("["+name+"] ", l.Handler()))
+	if h, ok := l.Handler().(*componentHandler); ok {
+		return New(newComponentHandler(h.component+"."+name, h.base, h.ops))
+	}
+	return New(newComponentHandler(name, l.Handler(), nil))
 }
 
 // With returns a child Logger that includes the given key-value pairs or Attrs

@@ -32,39 +32,60 @@ func TestLogger_NewNoopLogger(t *testing.T) {
 }
 
 func TestLogger_Scoped(t *testing.T) {
-	t.Run("adds prefix to messages", func(t *testing.T) {
+	decode := func(t *testing.T, buf *bytes.Buffer) map[string]any {
+		t.Helper()
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+		return rec
+	}
+
+	t.Run("records the component as an attribute", func(t *testing.T) {
 		var buf bytes.Buffer
-		h := slog.NewTextHandler(&buf, nil)
-		l := New(h).Scoped("component")
+		l := New(slog.NewJSONHandler(&buf, nil)).Scoped("svc")
 
-		l.Info("doing work")
+		l.Info("event", slog.String("trace", "abc123"))
 
-		out := buf.String()
-		require.Contains(t, out, "[component] doing work")
+		rec := decode(t, &buf)
+		require.Equal(t, "event", rec["msg"])
+		require.Equal(t, "svc", rec[ComponentKey])
+		require.Equal(t, "abc123", rec["trace"])
 	})
 
-	t.Run("chains prefixes when called repeatedly", func(t *testing.T) {
+	t.Run("joins nested components with dots in one attribute", func(t *testing.T) {
 		var buf bytes.Buffer
-		h := slog.NewTextHandler(&buf, nil)
-		l := New(h).Scoped("a").Scoped("b")
+		l := New(slog.NewTextHandler(&buf, nil)).Scoped("a").With("id", 1).Scoped("b").Scoped("c")
 
 		l.Info("msg")
 
 		out := buf.String()
-		require.Contains(t, out, "[a] [b] msg")
+		require.Equal(t, 1, strings.Count(out, ComponentKey+"="), out)
+		require.Contains(t, out, "component=a.b.c")
+		require.Contains(t, out, "id=1")
+		require.Contains(t, out, "msg=msg")
 	})
 
-	t.Run("preserves attributes on the record", func(t *testing.T) {
+	t.Run("keeps the component out of groups", func(t *testing.T) {
 		var buf bytes.Buffer
-		h := slog.NewJSONHandler(&buf, nil)
-		l := New(h).Scoped("svc")
+		l := New(slog.NewJSONHandler(&buf, nil)).Scoped("worker").WithGroup("task").Scoped("cleanup")
 
-		l.Info("event", slog.String("trace", "abc123"))
+		l.Info("done", "name", "tmp")
 
-		var rec map[string]any
-		require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
-		require.Equal(t, "[svc] event", rec["msg"])
-		require.Equal(t, "abc123", rec["trace"])
+		rec := decode(t, &buf)
+		require.Equal(t, "worker.cleanup", rec[ComponentKey])
+		task, ok := rec["task"].(map[string]any)
+		require.True(t, ok, "expected task group")
+		require.Equal(t, "tmp", task["name"])
+		require.NotContains(t, task, ComponentKey)
+	})
+
+	t.Run("does not change the parent logger", func(t *testing.T) {
+		var buf bytes.Buffer
+		parent := New(slog.NewJSONHandler(&buf, nil)).Scoped("a")
+		_ = parent.Scoped("b")
+
+		parent.Info("msg")
+
+		require.Equal(t, "a", decode(t, &buf)[ComponentKey])
 	})
 }
 
@@ -105,7 +126,8 @@ func TestLogger_With(t *testing.T) {
 
 		var rec map[string]any
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
-		require.Equal(t, "[worker] processing", rec["msg"])
+		require.Equal(t, "processing", rec["msg"])
+		require.Equal(t, "worker", rec[ComponentKey])
 		require.Equal(t, float64(42), rec["id"])
 
 		task, ok := rec["task"].(map[string]any)
